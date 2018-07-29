@@ -1,5 +1,6 @@
 require "yard"
 require "mustermann"
+require "yard/handlers/ruby/dsl_handler_methods"
 
 module YARD
 

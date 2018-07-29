@@ -1,14 +1,36 @@
 require "yard"
+require "mustermann"
 
 module YARD
 
   module Sinatra
+    HANDLE_METHODS = %w(get post put patch delete head not_found namespace)
+
+    HANDLE_METHODS.each do |meth|
+      YARD::Handlers::Ruby::DSLHandlerMethods::IGNORE_METHODS[meth] = true
+    end
+
     def self.routes
       YARD::Handlers::Sinatra::AbstractRouteHandler.routes
     end
 
     def self.error_handlers
       YARD::Handlers::Sinatra::AbstractRouteHandler.error_handlers
+    end
+
+    # Plugin options
+    #
+    # Available options:
+    # * `enable-outside-sinatra-base`: Allow processing to happen even outside of
+    #   namespaces descending from Sinatra::Base
+    # * `enable-unknown-namespaces`: Allow processing with namespaced method
+    #   calls (e.g. SomeClass.get), even when those cannot be confirmed to
+    #   descend from Sinatra::Base
+    # * `enable-instance-methods`: Allow processing of calls made from within
+    #   instance methods.
+    # * `enable-all`: Do not limit processing at all
+    def self.options
+      @options ||= YARD::Config.options['yard-sinatra'] || {}
     end
   end
 
@@ -29,6 +51,11 @@ module YARD
 
       def type 
         :method
+      end
+
+      def parameters
+        return [] if caller[1] =~ /`signature'/
+        @parameters
       end
     end
   end
@@ -55,7 +82,36 @@ module YARD
           @error_handlers ||= []
         end
 
+        def options
+          YARD::Sinatra.options
+        end
+
+        def check_outside_sinatra_base_pass(ns = namespace)
+          return true if options['enable-outside-sinatra-base']
+          ns.inheritance_tree.map(&:to_s).include? 'Sinatra::Base'
+        end
+
+        def check_unknown_namespace_pass
+          return true if options['enable-unknown-namespaces'] ||
+                         statement.namespace.nil? ||
+                         statement.namespace.source == 'self'
+          ns = Registry.resolve(namespace, statement.namespace.source, true)
+          return false if ns.nil? # Could not resolve namespace
+          check_outside_sinatra_base_pass(ns)
+        end
+
+        def check_instance_method_pass
+          return true if options['enable-instance-methods']
+          !(owner.type == :method && owner.scope == :instance)
+        end
+
         def process
+          unless options['enable-all']
+            return unless check_outside_sinatra_base_pass
+            return unless check_unknown_namespace_pass
+            return unless check_instance_method_pass
+          end
+
           case http_verb
           when 'NAMESPACE'
             AbstractRouteHandler.uri_prefixes << http_path(false)
@@ -72,18 +128,31 @@ module YARD
           # HACK: Removing some illegal letters.
           method_name = "" << verb << "_" << path.gsub(/[^\w_]/, "_")
           real_name   = "" << verb << " " << path
+
+          params = []
+          begin
+            pattern = Mustermann.new(path)
+            params = pattern.named_captures.keys.map{|v|[v]}
+          rescue Mustermann::ParseError => e
+            log.warn "Route parse error: #{e.message}" \
+            "\n        in `#{statement.file}':#{statement.line}"
+          end
+
           route = register CodeObjects::RouteObject.new(namespace, method_name, :instance) do |o|
             o.visibility = "public"
             o.source     = statement.source
             o.signature  = real_name
             o.explicit   = true
             o.scope      = scope
-            o.docstring  = statement.comments
             o.http_verb  = verb
             o.http_path  = path
             o.real_name  = real_name
+            o.parameters = params
             o.add_file(parser.file, statement.line)
+            o.docstring  = statement.comments
           end
+
+
           AbstractRouteHandler.routes << route
           yield(route) if block_given?
         end
@@ -109,14 +178,7 @@ module YARD
       class RouteHandler < Ruby::Base
         include AbstractRouteHandler
 
-        handles method_call(:get)
-        handles method_call(:post)
-        handles method_call(:put)
-        handles method_call(:patch)
-        handles method_call(:delete)
-        handles method_call(:head)
-        handles method_call(:not_found)
-        handles method_call(:namespace)
+        YARD::Sinatra::HANDLE_METHODS.each { |meth| handles method_call(meth.to_sym) }
 
         def http_verb
           statement.method_name(true).to_s.upcase
@@ -137,7 +199,7 @@ module YARD
       module Legacy
         class RouteHandler < Ruby::Legacy::Base
           include AbstractRouteHandler
-          handles /\A(get|post|put|patch|delete|head|not_found|namespace)[\s\(].*/m
+          handles /\A(#{YARD::Sinatra::HANDLE_METHODS.join('|')})[\s\(].*/m
 
           def http_verb
             statement.tokens.first.text.upcase

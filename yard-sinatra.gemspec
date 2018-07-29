@@ -1,7 +1,7 @@
 Gem::Specification.new do |s|
   # Get the facts.
   s.name             = "yard-sinatra"
-  s.version          = "1.0.0"
+  s.version          = "1.1.0"
   s.description      = "Displays Sinatra routes (including comments) in YARD output."
 
   # External dependencies
